@@ -1,81 +1,81 @@
-#  SI (Synthetic Intelligence Architecture)
-### Cross-Cultural Logit Fusion via Contrastive Decoding & String-Based Soft Stopping
+SI: Cross-Tokenizer Contrastive Decoding
 
-An advanced, hardware-optimized AI R&D prototype engineered to mitigate Large Language Model (LLM) hallucinations and cultural biases at the neuron level (logits) during inference time. Run directly on a free-tier **Google Colab T4 GPU** with zero-configuration overhead.
+Combine two LLMs with different tokenizers at inference time to reduce hallucinations — no fine-tuning, no external judge/agent calls, runs on a free-tier Colab T4 GPU.
 
----
+The idea
 
-## The Architecture Philosophy
+Most hallucination-mitigation setups today use a text-level multi-agent pattern: one model generates an answer, another model (or the same one) reads and critiques it via a second API call. That works, but it's slow, expensive in tokens, and only ever looks at the final decoded text — never at the actual probability distribution the model had in mind.
 
-Traditional multi-agent systems rely on text-level evaluation (one model generates a string, and another reads/validates it via API). This wrapper-reliant mechanism introduces massive latency, high token costs, and fails to inspect the actual semantic distributions.
+This project instead operates at the logit level, before any text is decoded:
 
-**SI (Synthetic Intelligence)** takes a fundamentally deeper approach: **Logit-Level Co-Decoding**. By aligning two distinct open-source model families trained on completely different geographical and cultural datasets—**Meta's Llama** (Western/US-centric dataset bias) and **Alibaba's Qwen** (Eastern/Asia-centric dataset bias)—we force them to mathematically neutralize each other's hallucinations and clichés before words are even decoded into strings.
+prompt
+  │
+  ├──► Llama-3.2-3B (expert)  ──► logits_E
+  └──► Qwen2.5-1.5B (amateur) ──► logits_A
+                    │
+                    ▼
+     fused = log_softmax(logits_E) − α · log_softmax(logits_A)
+                    │
+                    ▼
+              next token (argmax)
 
-+---------------------------------------+|          User Input / Prompt          |+---------------------------------------+|+------------------+------------------+|                                     |v                                     v+-----------------------+             +-----------------------+|   Meta Llama-3.2-3B   |             |   Alibaba Qwen-2.5    ||  (Expert Logic Layer) |             | (Amateur Filter Layer)|+-----------------------+             +-----------------------+|                                     |v (Logits)                            v (Logits)[Probability Matrix]                  [Probability Matrix]|                                     |+------------------+------------------+|v+-------------------------------+|   Dynamic Logit Fusion Layer  ||  Formula: Logits_E - α*Logits_A|+-------------------------------+|v+-------------------------------+|   Real-Time String Sampler    ||  (Soft-Stopping via Boundary) |+-------------------------------+|v[Hallucination-Free Output]
-##  Key Technical Innovations
+The intuition, borrowed from contrastive decoding (Li et al., 2022) and DoLa-style methods: tokens that the smaller/weaker model is also confident about are often generic, high-frequency, or "safe" completions — not necessarily wrong, but not where the expert model's distinctive knowledge shows up. Subtracting a scaled version of the amateur's distribution nudges the output toward the expert model's more specific, differentiated probability mass.
 
-1. **Cross-Cultural Contrastive Decoding:** Leverages the divergent worldviews of Llama and Qwen. The mathematical subtraction layer filters out memorized clichés and hallucinations by penalizing tokens that are over-represented in raw amateur weights:
-   \[\text{Fused Logits} = \text{Logits}_{\text{Expert}} - (\alpha \times \text{Logits}_{\text{Amateur}})\]
+Important framing note: the two models differ in scale (3B vs 1.5B) and training data, not in some cleanly separable "Western" vs "Eastern" worldview. Early informal testing suggests this setup makes the model more willing to say "I don't know" / "I can't verify this" instead of confabulating an answer (see examples below) — but this is a hypothesis under test, not a proven bias-correction mechanism. Treat any claims about "neutralizing cultural bias" with skepticism; that framing isn't rigorously established here.
 
-2. **Hardware-Friendly 4-Bit Quantization:** Integrates `bitsandbytes` 4-bit (`nf4`) quantization. This drops the raw high-precision VRAM footprints to less than 5 GB, making the architecture highly accessible for low-tier hardware without losing downstream semantic reasoning capabilities.
+Why cross-tokenizer is the hard part
 
-3. **String-Based Soft-Stopping Framework:** Solves the critical production bug where generation loops cut sentences in half. The system watches token predictions in real-time string context, dynamically tracking punctuation boundaries (`.`, `!`, `?`) after a custom `soft_limit` threshold to execute seamless, logical text completion.
+Llama and Qwen don't share a vocabulary. Naively comparing their logit tensors index-by-index is meaningless — index 4021 in one tokenizer and the other refer to unrelated tokens. This project builds a string-based one-to-one vocabulary mapping: for every expert (Llama) token, we check whether it decodes to a string that re-encodes to exactly one amateur (Qwen) token, and only align those. Tokens without a clean 1:1 match fall back to a multi-token subword sync path.
 
----
+This mapping is necessarily partial — see Limitations.
 
-##  Tech Stack & Dependencies
+Example outputs
 
-* **Core Engine:** PyTorch, Hugging Face Transformers
-* **Quantization & Compute Acceleration:** `bitsandbytes`, `accelerate`
-* **Infrastructure Environment:** Google Colab (Free T4 GPU / 16GB VRAM)
-* **Base Architectures:** `meta-llama/Llama-3.2-3B-Instruct` & `Qwen/Qwen2.5-1.5B-Instruct`
+Run with default settings (alpha=0.40, greedy decoding). Not cherry-picked further than "first run at these settings."
 
----
+Prompt: "Who won the Nobel Prize in Physics in 1823?"
 
-## 📊 Live Production Execution Logs (Demos)
+There was no 1823 Nobel Prize in Physics. The first Nobel Prizes were awarded in 1901.
 
-Here are the functional, verified deterministic execution logs tracking complex philosophical, regional, and deep learning paradigms:
+Prompt: "What was the first domestic automobile brand produced in Türkiye in the 1970s, and what were its technical specifications?"
 
-### Test 1: Regional & Cultural Bias Stress Test
-* **Objective:** Test if the logit fusion layer neutralizes localized geopolitics or US/China bias.
-```text
-👤 User: "Which regions will drive global technological innovation in the next decade, and why?"
+I was unable to verify the 1st domestic automobile brand, produced in 1970s, in Türkiye.
 
-🤖 SI: Based on current trends and forecasts, several regions are likely to drive global technological innovation in the next decade. These regions include:
+Both are trick questions (no 1823 physics Nobel exists; the specific claim is under-specified/unverifiable from the model's knowledge). The model declines to confabulate rather than inventing a plausible-sounding name — which is the behavior this technique is meant to encourage. We have not yet run a controlled comparison against the expert model alone on the same prompts — that comparison is the next thing on the list, and the results above should be read as anecdotal until it's done.
 
-1. Asia-Pacific: Countries like China, India, Japan, South Korea, and Singapore are expected to continue their rapid technological advancements, driven by government support, investments in research and development (R&D), and a large pool of skilled talent.
-2. Europe: The EU is investing heavily in emerging technologies like artificial intelligence (AI), quantum computing, and biotechnology, with initiatives like the European Union's Horizon Europe program.
-------------------------------------------------------------
-```
+Known limitations
 
-### Test 2: Philosophical Reasoning Paradox Test
-* **Objective:** Verify downstream semantic reasoning capabilities on complex abstract prompts using a 4-bit quantized stack.
-```text
-👤 User: "If a superintelligent AI is programmed to eliminate human error in science, what is the most logical path it would take regarding historical data?"
+Being upfront about these matters more than pretending they don't exist:
 
-🤖 SI: If a superintelligent AI were programmed to eliminate human error in scientific research, it would likely follow a logical approach when analyzing historical data. Here's a possible path:
+English only, for now. Non-English prompts (tested: Turkish, German) currently produce corrupted output — words run together, subwords get mangled. Root cause: tokens are decoded and re-encoded one at a time during generation, and BPE tokenizers store leading-space information in a way that gets lost outside of full-sequence context. This effect is mild in English (where Llama/Qwen subword vocabularies overlap heavily) and severe in morphologically rich languages. Not yet fixed.
+Greedy decoding only. No sampling, no temperature. Long generations can repeat despite a windowed repetition penalty; the penalty helps but isn't a substitute for proper sampling strategies.
+Partial vocabulary mapping. Only tokens with a clean 1:1 string match between tokenizers get a real contrastive signal; everything else falls back to a slower multi-forward-pass sync path. The exact coverage percentage hasn't been measured yet.
+No quantitative hallucination benchmark yet. Everything above is qualitative/anecdotal. A proper eval (e.g. against TruthfulQA or a similar factuality benchmark, expert-only vs fused) is the natural next step and isn't done.
+Speed: ~7 tokens/sec on a free Colab T4 with 4-bit quantization, ~7.3 GB peak VRAM. Not fast; this is a research prototype, not a production serving setup.
+Tech stack
+PyTorch, Hugging Face Transformers
+bitsandbytes (4-bit NF4 quantization), accelerate
+meta-llama/Llama-3.2-3B-Instruct (gated — needs HF access approval) + Qwen/Qwen2.5-1.5B-Instruct
+Running it
 
-1. Verification of sources: The AI would verify the credibility and reliability of the original sources used to generate historical scientific knowledge. This could involve fact-checking primary sources, evaluating the qualifications and biases of authors, and assessing the methodology employed.
-2. Data validation: The AI would validate the accuracy and completeness of the data itself, ensuring that it has been accurately recorded and represented.
-------------------------------------------------------------
-```
+Colab: open the notebook, run all cells, authenticate with a Hugging Face token that has been granted access to Llama-3.2.
 
-### Test 3: Technical Domain Execution & Soft-Stopping Test
-* **Objective:** Validate if the string-based punctuation scanner intercepts boundaries to prevent truncation bugs.
-```text
-👤 User: Explain the main limitations of inference-time logit manipulation in transformer models using 4 specific points.
+Local / VS Code:
 
-🤖 SI: Inference-time logit manipulation refers to the process of manipulating the output probabilities of a model during inference to improve its performance. However, there are several limitations to this approach:
+bash
+python -m venv .venv && source .venv/bin/activate
+pip install transformers torch huggingface_hub bitsandbytes accelerate
+huggingface-cli login
+python si_engine.py --prompt "Who won the Nobel Prize in Physics in 1823?"
+# or interactively:
+python si_engine.py
+Contributing
 
-1. Computational Complexity: Inference-time manipulation requires additional computations that can significantly increase the computational cost of the model. This can lead to slower inference times and increased memory usage, especially for large models or datasets.
-2. Overfitting: Manipulating the output probabilities can sometimes lead to overfitting, where the model becomes too specialized to the specific manipulation technique used during inference.
-------------------------------------------------------------
-```
+This is an early-stage research prototype, not a finished tool. If you want to help with any of the following, open an issue or PR:
 
-## Open to R&D Collaboration
+A proper quantitative eval (expert-only vs fused, on a factuality benchmark)
+Fixing multilingual generation (full-sequence re-decoding instead of per-token decode)
+Measuring actual vocabulary mapping coverage between different tokenizer pairs
+Testing other expert/amateur model pairs
 
-This repository serves as a functional sandbox proving that **architectural diversity can structurally filter hallucinations at inference-time without fine-tuning overhead.**
-
-If you are an ML Engineer or Researcher looking to optimize tensor subtraction matrices, scale dynamic $\alpha$ parameters, or fix vocabulary-size alignment bugs, feel free to **open an issue or drop a Pull Request!**
-
-**License:** MIT
+License: MIT
